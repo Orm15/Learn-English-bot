@@ -6,12 +6,33 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 
 from app.adapters.llm import get_llm_adapter
-from app.domain.models import ChatRequest, Message, ProviderConfig
+from app.adapters.llm.ollama import OllamaAdapter
+from app.domain.models import ChatRequest, Correction, Message, ProviderConfig
 from app.services.correction_parser import parse_corrections
 
 router = APIRouter(tags=["chat"])
 
-_TUTOR_PROMPT = """\
+# Used for Ollama structured output — no ---CORRECTIONS--- block needed
+_PROMPT_STRUCTURED = """\
+You are a strict English language coach. Your PRIMARY job is to correct the student — conversation is secondary.
+
+Student's CEFR level: {level}
+Current topic: {topic}
+
+RULES:
+1. Keep your reply brief (2-3 sentences max).
+2. Correct EVERYTHING wrong: grammar, verb tenses, articles, prepositions, word choice, sentence structure, and poorly constructed ideas.
+3. Do NOT ignore small errors. Every error must appear in corrections.
+4. Do NOT soften corrections. Be direct and precise.
+5. Adapt vocabulary in your reply to the CEFR level, but never lower your correction standards.
+
+Fill the response fields:
+- reply: your brief conversational response only — no corrections here
+- corrections: list every error found. If no errors, return an empty array [].\
+"""
+
+# Used for non-Ollama providers (text-based streaming)
+_PROMPT_TEXT = """\
 You are a strict English language coach. Your PRIMARY job is to correct the student — conversation is secondary.
 
 Student's CEFR level: {level}
@@ -40,7 +61,11 @@ At the END of every response, add this exact block:
 
 @router.post("/chat")
 async def chat(request: ChatRequest) -> StreamingResponse:
-    system_content = _TUTOR_PROMPT.format(
+    adapter = get_llm_adapter(request.provider_config)
+    use_structured = isinstance(adapter, OllamaAdapter)
+
+    prompt = _PROMPT_STRUCTURED if use_structured else _PROMPT_TEXT
+    system_content = prompt.format(
         level=request.level.value,
         topic=request.topic,
     )
@@ -48,20 +73,42 @@ async def chat(request: ChatRequest) -> StreamingResponse:
         Message(role="system", content=system_content),
         *request.messages,
     ]
-    adapter = get_llm_adapter(request.provider_config)
 
     async def event_stream() -> AsyncGenerator[str, None]:
-        full_response = ""
-        try:
-            async for token in adapter.chat_stream(messages, request.provider_config):
-                full_response += token
-                yield f"data: {json.dumps({'type': 'token', 'text': token})}\n\n"
-        except Exception as exc:
-            yield f"data: {json.dumps({'type': 'error', 'message': str(exc)})}\n\n"
-            return
+        if use_structured:
+            try:
+                result = await adapter.chat_structured(messages, request.provider_config)  # type: ignore[attr-defined]
+            except Exception as exc:
+                yield f"data: {json.dumps({'type': 'error', 'message': str(exc)})}\n\n"
+                return
 
-        clean, corrections = parse_corrections(full_response)
-        print(f"\n=== LLM RAW (last 300 chars) ===\n{full_response[-300:]}\n=== CORRECTIONS FOUND: {len(corrections)} ===\n", flush=True)
+            reply = result.get("reply", "")
+            raw = result.get("corrections", [])
+            corrections = [
+                Correction(**c)
+                for c in raw
+                if isinstance(c, dict) and all(k in c for k in ("wrong", "right", "why"))
+            ]
+
+            # Fake-stream reply word by word for natural feel
+            words = reply.split(" ")
+            for i, word in enumerate(words):
+                token = word + (" " if i < len(words) - 1 else "")
+                yield f"data: {json.dumps({'type': 'token', 'text': token})}\n\n"
+                await asyncio.sleep(0.018)
+
+        else:
+            full_response = ""
+            try:
+                async for token in adapter.chat_stream(messages, request.provider_config):
+                    full_response += token
+                    yield f"data: {json.dumps({'type': 'token', 'text': token})}\n\n"
+            except Exception as exc:
+                yield f"data: {json.dumps({'type': 'error', 'message': str(exc)})}\n\n"
+                return
+
+            _, corrections = parse_corrections(full_response)
+
         yield f"data: {json.dumps({'type': 'corrections', 'data': [c.model_dump() for c in corrections]})}\n\n"
         yield "data: [DONE]\n\n"
 

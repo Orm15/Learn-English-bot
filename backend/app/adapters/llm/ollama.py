@@ -6,6 +6,26 @@ import httpx
 from app.domain.models import Message, ProviderConfig
 from app.ports.llm_port import LLMPort
 
+_STRUCTURED_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "reply": {"type": "string"},
+        "corrections": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "wrong": {"type": "string"},
+                    "right": {"type": "string"},
+                    "why":   {"type": "string"},
+                },
+                "required": ["wrong", "right", "why"],
+            },
+        },
+    },
+    "required": ["reply", "corrections"],
+}
+
 
 class OllamaAdapter(LLMPort):
     async def chat_stream(
@@ -33,3 +53,20 @@ class OllamaAdapter(LLMPort):
                             yield delta
                     except (json.JSONDecodeError, KeyError, IndexError):
                         continue
+
+    async def chat_structured(
+        self, messages: list[Message], config: ProviderConfig
+    ) -> dict:
+        """Non-streaming request using Ollama native JSON Schema format."""
+        url = f"{config.base_url.rstrip('/')}/api/chat"
+        payload = {
+            "model": config.model,
+            "messages": [{"role": m.role, "content": m.content} for m in messages],
+            "format": _STRUCTURED_SCHEMA,
+            "stream": False,
+        }
+        async with httpx.AsyncClient(timeout=120) as client:
+            resp = await client.post(url, json=payload)
+            resp.raise_for_status()
+            content = resp.json()["message"]["content"]
+            return json.loads(content)
