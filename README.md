@@ -54,25 +54,92 @@ Recommended model: `qwen2.5:7b` (~5 GB VRAM, text-only, fast)
 
 ## Quick Start
 
+### 1. Clone the repo
+
 ```bash
-# 1. Clone the repo
-git clone <repo-url>
-cd speakup
+git clone https://github.com/Orm15/Learn-English-bot.git
+cd Learn-English-bot
+```
 
-# 2. Copy environment file
+### 2. Configure environment
+
+```bash
 cp .env.example .env
+```
 
-# 3. Pull the default model (runs natively, not in Docker)
-OLLAMA_ORIGINS=* ollama serve   # if not already running as a service
+The defaults work out of the box for a local Ollama setup. Edit `.env` only if your Ollama runs on a different port.
+
+### 3. Set up Ollama
+
+Ollama must listen on all network interfaces so the backend container can reach it. **This is required — without it the app returns 503.**
+
+**Option A — start manually (one terminal):**
+```bash
+OLLAMA_HOST=0.0.0.0 ollama serve
+```
+
+**Option B — systemd service:**
+```bash
+sudo systemctl edit ollama
+```
+Add the following and save:
+```ini
+[Service]
+Environment="OLLAMA_HOST=0.0.0.0"
+```
+Then restart:
+```bash
+sudo systemctl restart ollama
+```
+
+### 4. Pull the model
+
+In a new terminal:
+```bash
 ollama pull qwen2.5:7b
+```
 
-# 4. Build and start all services
+`qwen2.5:7b` is recommended — ~5 GB VRAM, runs fully on GPU with no RAM spillover. Any other Ollama model works; you can change it later in the Settings panel.
+
+### 5. Build and start all services
+
+```bash
 docker compose up --build
 ```
 
-Open **http://localhost:3000** in your browser.
+First build takes ~5–10 minutes — the voice service downloads the Whisper model during build. Subsequent builds are fast (Docker layer cache).
 
-> First build takes a few minutes — the voice service downloads the Whisper model (~74 MB) during the build step.
+Wait until you see all three services ready:
+```
+backend-1   | Application startup complete.
+voice-1     | Application startup complete.
+frontend-1  | ✓ Ready
+```
+
+### 6. Open the app
+
+Go to **http://localhost:3000**
+
+### 7. Verify the connection
+
+```bash
+curl http://localhost:8000/health   # → {"status":"ok"}
+curl http://localhost:8001/health   # → {"status":"ok"}
+```
+
+Then in the app: click **⚙ Settings → Provider → Test connection**. It should show green.
+
+> If "Test connection" fails, confirm Ollama is running with `OLLAMA_HOST=0.0.0.0` (step 3) and that the model is pulled (step 4).
+
+### How to use
+
+| Action | How |
+|--------|-----|
+| Send a text message | Type and press **Enter** |
+| Use voice input | Press **mic** → speak → press **mic** again to stop → text appears in input → press **Enter** to send |
+| Hear the tutor's reply | On by default — toggle in **Settings → Voice** |
+| Change level or topic | Left sidebar |
+| Change LLM provider / model | **Settings → Provider** |
 
 ## Environment Variables
 
